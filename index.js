@@ -1,65 +1,125 @@
+require('dotenv').config();
 const express = require('express');
+const mongoose = require('mongoose');
+
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// In-memory CD collection
-let cds = [
-  { id: 1, title: 'Hybrid Theory', artist: 'Linkin Park', genre: 'Rock', year: 2000 },
-  { id: 2, title: 'Thriller', artist: 'Michael Jackson', genre: 'Pop', year: 1982 },
-  { id: 3, title: 'The Eminem Show', artist: 'Eminem', genre: 'Hip-Hop', year: 2002 },
-  { id: 4, title: 'Back in Black', artist: 'AC/DC', genre: 'Rock', year: 1980 },
-  { id: 5, title: '21', artist: 'Adele', genre: 'Soul', year: 2011 },
-  { id: 6, title: 'Fearless', artist: 'Taylor Swift', genre: 'Country', year: 2008 },
-  { id: 7, title: 'Nevermind', artist: 'Nirvana', genre: 'Grunge', year: 1991 },
-  { id: 8, title: 'Future Nostalgia', artist: 'Dua Lipa', genre: 'Pop', year: 2020 },
-  { id: 9, title: 'American Idiot', artist: 'Green Day', genre: 'Punk Rock', year: 2004 },
-  { id: 10, title: 'Good Kid, M.A.A.D City', artist: 'Kendrick Lamar', genre: 'Hip-Hop', year: 2012 }
-];
+// MongoDB Connection
+mongoose
+  .connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/cd_inventory')
+  .then(() => console.log('Successfully connected to MongoDB.'))
+  .catch((err) => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+  });
 
-let nextId = 11;
+// Mongoose CD Model
+const cdSchema = new mongoose.Schema(
+  {
+    title: { type: String, required: true, trim: true },
+    artist: { type: String, required: true, trim: true },
+    genre: { type: String, required: true, trim: true },
+    year: { type: Number, required: true },
+  },
+  { timestamps: true }
+);
 
-// GET /cds - Return all CDs
-app.get('/cds', (req, res) => {
-  res.json(cds);
+const CD = mongoose.model('CD', cdSchema);
+
+// GET /cds - Return CDs (with optional query filters: artist, genre, before, fields)
+app.get('/cds', async (req, res) => {
+  try {
+    const { artist, genre, before, fields } = req.query;
+    const filter = {};
+
+    if (artist) {
+      filter.artist = new RegExp(`^${artist}$`, 'i');
+    }
+
+    if (genre) {
+      filter.genre = new RegExp(`^${genre}$`, 'i');
+    }
+
+    if (before) {
+      const yearLimit = parseInt(before, 10);
+      if (isNaN(yearLimit)) {
+        return res.status(400).json({ error: 'Parameter "before" must be a valid number' });
+      }
+      filter.year = { $lt: yearLimit };
+    }
+
+    let projection = '';
+    if (fields) {
+      projection = fields.split(',').join(' ');
+    }
+
+    const cds = await CD.find(filter).select(projection);
+    res.json(cds);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error while fetching CDs', details: error.message });
+  }
 });
 
 // POST /cds - Add a new CD
-app.post('/cds', (req, res) => {
-  const { title, artist, genre, year } = req.body;
-  const newCd = { id: nextId++, title, artist, genre, year };
-  cds.push(newCd);
-  res.status(201).json(newCd);
+app.post('/cds', async (req, res) => {
+  try {
+    const { title, artist, genre, year } = req.body;
+    const newCD = new CD({ title, artist, genre, year });
+    const savedCD = await newCD.save();
+    res.status(201).json(savedCD);
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Validation Error', details: error.message });
+    }
+    res.status(500).json({ error: 'Server error while adding CD', details: error.message });
+  }
 });
 
 // PUT /cds/:id - Update an existing CD
-app.put('/cds/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const cd = cds.find(cd => cd.id === id);
+app.put('/cds/:id', async (req, res) => {
+  try {
+    const updatedCD = await CD.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    );
 
-  const { title, artist, genre, year } = req.body;
-  if (title) cd.title = title;
-  if (artist) cd.artist = artist;
-  if (genre) cd.genre = genre;
-  if (year) cd.year = year;
+    if (!updatedCD) {
+      return res.status(404).json({ error: 'CD not found' });
+    }
 
-  res.json(cd);
+    res.json(updatedCD);
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({ error: 'Invalid CD ID format' });
+    }
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({ error: 'Validation Error', details: error.message });
+    }
+    res.status(500).json({ error: 'Server error while updating CD', details: error.message });
+  }
 });
 
 // DELETE /cds/:id - Delete a CD
-app.delete('/cds/:id', (req, res) => {
-  const id = parseInt(req.params.id);
-  const index = cds.findIndex(cd => cd.id === id);
-  const deleted = cds.splice(index, 1);
-  res.json(deleted[0]);
-});
+app.delete('/cds/:id', async (req, res) => {
+  try {
+    const deletedCD = await CD.findByIdAndDelete(req.params.id);
 
-// TODO:
-// - Replace in-memory data with a Mongoose model
-// - Replace all CRUD operations with MongoDB queries
-// - Implement query support for filtering and selecting fields
-// - Add proper error checking and validation for inputs and operations
+    if (!deletedCD) {
+      return res.status(404).json({ error: 'CD not found' });
+    }
+
+    res.json(deletedCD);
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({ error: 'Invalid CD ID format' });
+    }
+    res.status(500).json({ error: 'Server error while deleting CD', details: error.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
